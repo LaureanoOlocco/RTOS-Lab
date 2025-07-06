@@ -52,8 +52,8 @@
 #define QUEUE_LENGTH                10         // Queue length for temperature values
 
 /*====================== Filter Parameters ========================*/
-#define MAX_WINDOW_SIZE             10         // Max filter window size
-#define MIN_WINDOW_SIZE             2          // Min filter window size
+#define MAX_WINDOW_SIZE             100         // Max filter window size
+#define MIN_WINDOW_SIZE             10          // Min filter window size
 
 /*====================== FreeRTOS Stack Sizes ========================*/
 #define STACK_SIZE_TEMP_SENSOR      96         // Stack for temperature task
@@ -85,6 +85,7 @@ void setPixel(int x, int y, int on);
 int pseudorandom(void);
 int stringToInt(const char *str);
 void formatTaskStats(char *buffer, TaskStatus_t *task, uint32_t totalRunTime);
+void vBusyTask(void *pvParameters);
 char *utoa(unsigned int value, char *str, int base);
 
 /* Task prototypes */
@@ -150,49 +151,108 @@ unsigned long ulGetHighFrequencyTimerTicks(void)
 
 int main(void)
 {
-    vUARTSetup();  // Configures UART and enables interrupts.
+    // Initialize UART and enable UART0 RX interrupts
+    vUARTSetup();
 
-//  Creamos la cola para enviar datos de temperatura sin filtrar
+    // Create queue for raw (unfiltered) temperature values
     xRawTemperatureQueue = xQueueCreate(QUEUE_LENGTH, sizeof(int));
-
     if (xRawTemperatureQueue == NULL) {
-        //  Si la cola no pudo crearse (posible falta de memoria), lo informamos por UART
         vUARTSend("Error: Failed to create raw temperature queue.\n");
-
-    //Entramos en bucle infinito porque el sistema no puede continuar sin esta cola
-        for (;;);
+        for (;;);  // Critical failure — can't continue without this queue
     }
 
-    // Queue to pass filtered values
+    // Create queue for filtered temperature values
     xFilteredDataQueue = xQueueCreate(QUEUE_LENGTH, sizeof(int));
     if (xFilteredDataQueue == NULL) {
         vUARTSend("Error: Could not create queue for filtered values.\n");
-        for (;;);
+        for (;;);  // Critical failure
     }
 
     vUARTSend("Starting...\n");
 
-    OSRAMInit(TRUE);  // Initializes the display with fast speed (400 kbps)
-    OSRAMDisplayOn(); // Turn on the display
+    // Initialize display (fast mode: 400 kbps)
+    OSRAMInit(TRUE);
+    OSRAMDisplayOn();
 
-    xTaskCreate(vSimulateTemperatureSensorTask, "TempSensorTask", STACK_SIZE_TEMP_SENSOR, NULL, tskIDLE_PRIORITY + 1, NULL);
-    xTaskCreate(vLowPassFilterTask, "FilterTask", STACK_SIZE_FILTER, NULL, tskIDLE_PRIORITY + 2, NULL);
-    xTaskCreate(vDisplayGraphTask, "GraphTask", STACK_SIZE_GRAPH, NULL, tskIDLE_PRIORITY + 3, NULL);
-    BaseType_t result = xTaskCreate(vUARTReaderTask, "UARTReader", STACK_SIZE_UART_READER, NULL, tskIDLE_PRIORITY + 4, NULL);
+    // -------------------------------
+    //         Create FreeRTOS Tasks
+    // -------------------------------
+
+    xTaskCreate(
+        vSimulateTemperatureSensorTask,    // Task function
+        "TempSensorTask",                  // Task name
+        STACK_SIZE_TEMP_SENSOR,            // Stack size
+        NULL,                              // Parameters
+        tskIDLE_PRIORITY + 1,              // Priority
+        NULL                               // Task handle
+    );
+
+    xTaskCreate(
+        vLowPassFilterTask,
+        "FilterTask",
+        STACK_SIZE_FILTER,
+        NULL,
+        tskIDLE_PRIORITY + 2,
+        NULL
+    );
+
+    xTaskCreate(
+        vDisplayGraphTask,
+        "GraphTask",
+        STACK_SIZE_GRAPH,
+        NULL,
+        tskIDLE_PRIORITY + 3,
+        NULL
+    );
+
+    xTaskCreate(
+        vBusyTask,
+        "BusyTask",
+        128,  // Small stack, adjust if needed
+        NULL,
+        tskIDLE_PRIORITY + 1,
+        NULL
+    );
+
+    BaseType_t result = xTaskCreate(
+        vUARTReaderTask,
+        "UARTReader",
+        STACK_SIZE_UART_READER,
+        NULL,
+        tskIDLE_PRIORITY + 4,
+        NULL
+    );
+
     if (result != pdPASS) {
-        vUARTSend("❌ UARTReaderTask couldn't be created.\n");
+        vUARTSend("UARTReaderTask couldn't be created.\n");
     }
-    xTaskCreate(vMonitorStackTask, "MonitorStack", STACK_SIZE_MONITOR_STACK, NULL, tskIDLE_PRIORITY + 1, NULL);
-    xTaskCreate(vTopLikeTask, "TopTask", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
 
+    xTaskCreate(
+        vMonitorStackTask,
+        "MonitorStack",
+        STACK_SIZE_MONITOR_STACK,
+        NULL,
+        tskIDLE_PRIORITY + 1,
+        NULL
+    );
+
+    xTaskCreate(
+        vTopLikeTask,
+        "TopTask",
+        configMINIMAL_STACK_SIZE,
+        NULL,
+        tskIDLE_PRIORITY + 1,
+        NULL
+    );
+
+    // Start FreeRTOS scheduler (will not return unless something goes wrong)
     vTaskStartScheduler();
 
-    // Should never reach this point
-    for(;;);
+    // Should never reach here
+    for (;;);
 
     return 0;
 }
-
 /* ------------------------------------- Tasks --------------------------------------------- */
 
 /**
@@ -381,7 +441,7 @@ void vUARTReaderTask(void *pvParameters) {
                     inputBuffer[inputIndex++] = c;
                 } else {
                     inputIndex = 0;
-                    vUARTSend("\n❗ Very long entry. Try again.\r\n");
+                    vUARTSend("\nVery long entry. Try again.\r\n");
                 }
             } else if (c == '\r' || c == '\n') {
                 vUARTSend("\r\n");
@@ -391,19 +451,19 @@ void vUARTReaderTask(void *pvParameters) {
                     int newN = stringToInt(inputBuffer);
                     if (newN >= MIN_WINDOW_SIZE && newN <= MAX_WINDOW_SIZE) {
                         filter_window_size = newN;
-                        vUARTSend("\n✅ Filter now N = ");
+                        vUARTSend("\n Filter now N = ");
                         vUARTSend(inputBuffer);
                         vUARTSend("\r\n");
                     } else {
-                        vUARTSend("\n❗ Invalid N (2-10).\r\n");
+                        vUARTSend("\n Invalid N (10-100).\r\n");
                     }
                 } else {
-                    vUARTSend("\n⚠️ Empty buffer.\r\n");
+                    vUARTSend("\n Empty buffer.\r\n");
                 }
                 inputIndex = 0;
             } else {
                 inputIndex = 0;
-                vUARTSend("\n❗ Non numeric character.\r\n");
+                vUARTSend("\n Non numeric character.\r\n");
             }
         } else {
             vTaskDelay(pdMS_TO_TICKS(DELAY_10_MS));  // Avoid saturating the CPU if there is no data
@@ -431,7 +491,7 @@ void vMonitorStackTask(void *pvParameters)
         UBaseType_t stackGraph = uxTaskGetStackHighWaterMark(xGraphHandle);
         UBaseType_t stackUART = uxTaskGetStackHighWaterMark(xUARTReaderHandle);
 
-        vUARTSend("\n📊 Stack High Water Marks:\n");
+        vUARTSend("\nStack High Water Marks:\n");
 
         formatString(buffer, "TempSensor HWM: ", stackTemp, "\n");
         vUARTSend(buffer);
@@ -472,7 +532,7 @@ void vTopLikeTask(void *pvParameters)
         uxArraySize = uxTaskGetNumberOfTasks();
 
         utoa(xPortGetFreeHeapSize(), buffer, BASE_DECIMAL);
-        vUARTSend("\n📉 Free Heap: ");
+        vUARTSend("\nFree Heap: ");
         vUARTSend(buffer);
         vUARTSend("\n");
 
@@ -488,7 +548,7 @@ void vTopLikeTask(void *pvParameters)
                 uxMaxTasks = uxArraySize;
             else
             {
-                vUARTSend("❌ Could not allocate memory for pxTaskStatusArray\n");
+                vUARTSend(" Could not allocate memory for pxTaskStatusArray\n");
                 vTaskDelay(pdMS_TO_TICKS(DELAY_5_SECONDS));
                 continue;
             }
@@ -496,7 +556,7 @@ void vTopLikeTask(void *pvParameters)
 
         uxArraySize = uxTaskGetSystemState(pxTaskStatusArray, uxArraySize, &ulTotalRunTime);
 
-        vUARTSend("\n🔍 Task Stats:\n");
+        vUARTSend("\nTask Stats:\n");
 
         for (x = 0; x < uxArraySize; x++)
         {
@@ -671,32 +731,44 @@ int stringToInt(const char *str) {
  * @param task Pointer to the TaskStatus_t structure containing information about the task.
  * @param totalRunTime Total runtime of all tasks, used to compute CPU usage percentage.
  */
-void formatTaskStats(char *buffer, TaskStatus_t *task, uint32_t totalRunTime) {
-    char temp[BUFFER_SIZE_TEMP];
+void formatTaskStats(char *buffer, TaskStatus_t *task, uint32_t totalRunTime)
+{
+    char temp[16];
     uint32_t cpu = 0;
+    buffer[0] = '\0'; // Clear output buffer
 
-    buffer[0] = '\0';  // Clear buffer
-
-    strcat(buffer, "📌 Name: ");
-    strcat(buffer, task->pcTaskName);
-
-    strcat(buffer, " | CPU: ");
-
+    // CPU usage
     if (totalRunTime > 0) {
         cpu = (task->ulRunTimeCounter * 100UL) / totalRunTime;
     }
 
-    utoa(cpu, temp, BASE_DECIMAL);  // Convert number to string
-    strcat(buffer, temp);
+    // Nombre con padding fijo (10 caracteres, ajustable)
+    strcat(buffer, "Name: ");
+    strcat(buffer, task->pcTaskName);
 
-    strcat(buffer, "% | Stack Free: ");
-    utoa(task->usStackHighWaterMark, temp, BASE_DECIMAL);
+    int nameLen = strlen(task->pcTaskName);
+    for (int i = nameLen; i < 9; i++) {
+        strcat(buffer, " ");
+    }
+
+    strcat(buffer, " | CPU: ");
+    utoa(cpu, temp, 10);
+    strcat(buffer, temp);
+    strcat(buffer, "%");
+
+    // Padding para CPU (< 3 cifras + %)
+    int cpuDigits = (cpu < 10) ? 1 : (cpu < 100) ? 2 : 3;
+    for (int i = cpuDigits + 1; i < 5; i++) { // +1 por '%'
+        strcat(buffer, " ");
+    }
+
+    strcat(buffer, "| Stack Free: ");
+    utoa(task->usStackHighWaterMark, temp, 10);
     strcat(buffer, temp);
 
     strcat(buffer, " | State: ");
-    utoa(task->eCurrentState, temp, BASE_DECIMAL);
+    utoa(task->eCurrentState, temp, 10);
     strcat(buffer, temp);
-
     strcat(buffer, "\n");
 }
 
@@ -742,4 +814,16 @@ char *utoa(unsigned int value, char *str, int base) {
         *ptr1++ = tmp_char;
     }
     return str;
+}
+void vBusyTask(void *pvParameters)
+{
+    (void)pvParameters;
+
+    for (;;)
+    {
+        volatile int x = 0;
+        for (int i = 0; i < 100000; i++) {
+            x += i;
+        }
+    }
 }
